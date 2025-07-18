@@ -248,6 +248,12 @@ to the default face)."
                                     (symbol)))
   :group 'svg-lib)
 
+(defcustom svg-lib-async-download nil
+  "Allow downloading icons asynchronously.
+When this is non-nil, getting uncached icons will return nil, then
+downloading happens in the background."
+  :type 'boolean)
+
 (defun svg-lib-style-default--get ()
   "Get default style.
 
@@ -517,6 +523,9 @@ and additional style elements ARGS."
 
     (svg-lib--image svg :ascent svg-ascent)))
 
+(defvar svg-lib--icon-get-data--async-downloading-list '()
+  "List of downloading URLs recorded, to avoid duplicate operations.")
+
 ;; Create a rounded box icon
 (defun svg-lib--icon-get-data (collection name &optional force-reload)
   "Retrieve icon NAME from COLLECTION.
@@ -529,17 +538,31 @@ Cached version is returned if it exists unless FORCE-RELOAD is t."
     (unless (file-exists-p svg-lib-icons-dir)
       (make-directory svg-lib-icons-dir t))
     (let* ((filename (expand-file-name (format "%s_%s.svg" collection name) svg-lib-icons-dir))
-           (buffer (if (or force-reload (not (file-exists-p filename)))
-                       (with-current-buffer (url-retrieve-synchronously url)
-                         (goto-char (point-min))
-                         (search-forward "\n\n")
-                         (write-region (point) (point-max) filename)
-                         (current-buffer))
-                     (with-current-buffer (generate-new-buffer " *temp*")
-                       (insert-file-contents filename)
-                       (current-buffer)))))
-      (with-current-buffer buffer
-        (xml-parse-region (point-min) (point-max))))))
+           (process-downloaded
+            (lambda (&rest _)
+              (remove-hook 'svg-lib--icon-get-data--async-downloading-list url)
+              (goto-char (point-min))
+              (search-forward "\n\n")
+              (write-region (point) (point-max) filename)
+              (current-buffer)))
+           (buffer
+            (cond
+             ((not (or force-reload (not (file-exists-p filename))))
+              (with-current-buffer (generate-new-buffer " *temp*")
+                (insert-file-contents filename)
+                (current-buffer)))
+             (svg-lib-async-download
+              (unless (member
+                       url svg-lib--icon-get-data--async-downloading-list)
+                (add-hook 'svg-lib--icon-get-data--async-downloading-list url)
+                (url-retrieve url process-downloaded))
+              nil)
+             (t
+              (with-current-buffer (url-retrieve-synchronously url)
+                (funcall process-downloaded))))))
+      (and buffer
+           (with-current-buffer buffer
+             (xml-parse-region (point-min) (point-max)))))))
 
 
 (defun svg-lib-icon (icon &optional face-or-style &rest args)
@@ -553,61 +576,61 @@ given FACE-OR-STYLE and additional style elements ARGS."
                       (t
                        (apply #'svg-lib-style (svg-lib-style-default--get) args))))
          (collection  (plist-get style :collection))
-         (root (svg-lib--icon-get-data collection icon))
-         (foreground  (plist-get style :foreground))
-         (background  (plist-get style :background))
-         (stroke      (plist-get style :stroke))
-         (height      (plist-get style :height))
-         (radius      (plist-get style :radius))
-         (scale       (plist-get style :scale))
-         (margin      (plist-get style :margin))
-         (padding     (plist-get style :padding))
-         (width      (+ 2 padding))
-         (txt-char-width  (window-font-width))
-         (txt-char-height (window-font-height))
-         (box-width       (* width txt-char-width))
-         (box-height      (* height txt-char-height))
-         (svg-width       (+ box-width (* margin txt-char-width)))
-         (svg-height      box-height)
-         (svg-ascent      (plist-get style :ascent))
-         (box-x           (/ (- svg-width box-width) 2))
-         (box-y           0)
-         (viewbox (cdr (assq 'viewBox (xml-node-attributes (car root)))))
-         (viewbox (mapcar #'string-to-number (split-string viewbox)))
-         (icon-x      (nth 0 viewbox))
-         (icon-y      (nth 1 viewbox))
-         (icon-width  (nth 2 viewbox))
-         (icon-height (nth 3 viewbox))
-         (scale       (* scale (/ (float box-height) (float icon-height))))
-         (icon-transform
-          (format "translate(%f,%f) scale(%f) translate(%f,%f)"
-                  (- icon-x )
-                  (- icon-y )
-                  scale
-                  (- (/ svg-width 2 scale) (/ icon-width 2))
-                  (- (/ svg-height 2 scale) (/ icon-height 2))))
+         (root (svg-lib--icon-get-data collection icon)))
+    (and root
+         (let* ((foreground  (plist-get style :foreground))
+                (background  (plist-get style :background))
+                (stroke      (plist-get style :stroke))
+                (height      (plist-get style :height))
+                (radius      (plist-get style :radius))
+                (scale       (plist-get style :scale))
+                (margin      (plist-get style :margin))
+                (padding     (plist-get style :padding))
+                (width      (+ 2 padding))
+                (txt-char-width  (window-font-width))
+                (txt-char-height (window-font-height))
+                (box-width       (* width txt-char-width))
+                (box-height      (* height txt-char-height))
+                (svg-width       (+ box-width (* margin txt-char-width)))
+                (svg-height      box-height)
+                (svg-ascent      (plist-get style :ascent))
+                (box-x           (/ (- svg-width box-width) 2))
+                (box-y           0)
+                (viewbox (cdr (assq 'viewBox (xml-node-attributes (car root)))))
+                (viewbox (mapcar #'string-to-number (split-string viewbox)))
+                (icon-x      (nth 0 viewbox))
+                (icon-y      (nth 1 viewbox))
+                (icon-width  (nth 2 viewbox))
+                (icon-height (nth 3 viewbox))
+                (scale       (* scale (/ (float box-height) (float icon-height))))
+                (icon-transform
+                 (format "translate(%f,%f) scale(%f) translate(%f,%f)"
+                         (- icon-x )
+                         (- icon-y )
+                         scale
+                         (- (/ svg-width 2 scale) (/ icon-width 2))
+                         (- (/ svg-height 2 scale) (/ icon-height 2))))
 
-         (svg (svg-create svg-width svg-height)))
+                (svg (svg-create svg-width svg-height)))
+           (when (>= stroke 0.25)
+             (svg-rectangle svg box-x box-y box-width box-height
+                            :fill foreground :rx radius))
+           (when background
+             (svg-rectangle svg (+ box-x (/ stroke 2.0))
+                            (+ box-y (/ stroke 2.0))
+                            (- box-width stroke)
+                            (- box-height stroke)
+                            :fill background :rx (- radius (/ stroke 2.0))))
 
-    (when (>= stroke 0.25)
-      (svg-rectangle svg box-x box-y box-width box-height
-                     :fill foreground :rx radius))
-    (when background
-      (svg-rectangle svg (+ box-x (/ stroke 2.0))
-                     (+ box-y (/ stroke 2.0))
-                     (- box-width stroke)
-                     (- box-height stroke)
-                     :fill background :rx (- radius (/ stroke 2.0))))
-
-    (dolist (item (xml-get-children (car root) 'path))
-      (let* ((attrs (xml-node-attributes item))
-             (path (cdr (assoc 'd attrs)))
-             ;; (fill (or (cdr (assoc 'fill attrs)) foreground))
-             )
-        (svg-node svg 'path :d path
-                            :fill foreground
-                            :transform icon-transform)))
-    (svg-lib--image svg :ascent svg-ascent)))
+           (dolist (item (xml-get-children (car root) 'path))
+             (let* ((attrs (xml-node-attributes item))
+                    (path (cdr (assoc 'd attrs)))
+                    ;; (fill (or (cdr (assoc 'fill attrs)) foreground))
+                    )
+               (svg-node svg 'path :d path
+                         :fill foreground
+                         :transform icon-transform)))
+           (svg-lib--image svg :ascent svg-ascent)))))
 
 
 
@@ -623,69 +646,69 @@ and additional style elements ARGS."
                       (t
                        (apply #'svg-lib-style (svg-lib-style-default--get) args))))
          (collection (plist-get style :collection))
-         (root (svg-lib--icon-get-data collection icon))
-         (foreground  (plist-get style :foreground))
-         (background  (plist-get style :background))
-         (stroke      (plist-get style :stroke))
-         (height      (plist-get style :height))
-         (radius      (plist-get style :radius))
-         (scale       (plist-get style :scale))
-         (margin      (plist-get style :margin))
-         (padding     (plist-get style :padding))
-         (font-size   (plist-get style :font-size))
-         (font-family (plist-get style :font-family))
-         (font-weight (plist-get style :font-weight))
-         (label-length    (+ (length label) 2))
-         (txt-char-width  (window-font-width))
-         (txt-char-height (window-font-height))
-         (font-info       (font-info (format "%s-%d" font-family font-size)))
-         (ascent          (aref font-info 8))
-         (tag-char-width  (aref font-info 11))
-         (tag-width       (* (+ label-length padding) txt-char-width))
-         (tag-height      (* txt-char-height height))
-         (svg-width       (+ tag-width (* margin txt-char-width)))
-         (svg-height      tag-height)
-         (svg-ascent      (plist-get style :ascent))
-         (tag-x (/ (- svg-width tag-width) 2))
-         (text-x (+ tag-x (/ (- tag-width (* (length label) tag-char-width)) 2)))
-         (text-x (+ text-x tag-char-width))
-         (text-y ascent)
-         (viewbox (cdr (assq 'viewBox (xml-node-attributes (car root)))))
-         (viewbox (mapcar 'string-to-number (split-string viewbox)))
-         (icon-x      (nth 0 viewbox))
-         (icon-y      (nth 1 viewbox))
-         (icon-width  (nth 2 viewbox))
-         (icon-height (nth 3 viewbox))
-         (scale       (* scale (/ (float tag-height) (float icon-height))))
-         (icon-transform
-          (format "translate(%f,%f) scale(%f) translate(%f,%f)"
-                  (- icon-x )
-                  (- icon-y )
-                  scale
-                  (- (/ (- text-x (* tag-char-width 1.25)) scale) (/ icon-width 2))
-                  (- (/ svg-height 2 scale) (/ icon-height 2))))
-         (svg (svg-create svg-width svg-height)))
+         (root (svg-lib--icon-get-data collection icon)))
+    (and root
+         (let* ((foreground  (plist-get style :foreground))
+                (background  (plist-get style :background))
+                (stroke      (plist-get style :stroke))
+                (height      (plist-get style :height))
+                (radius      (plist-get style :radius))
+                (scale       (plist-get style :scale))
+                (margin      (plist-get style :margin))
+                (padding     (plist-get style :padding))
+                (font-size   (plist-get style :font-size))
+                (font-family (plist-get style :font-family))
+                (font-weight (plist-get style :font-weight))
+                (label-length    (+ (length label) 2))
+                (txt-char-width  (window-font-width))
+                (txt-char-height (window-font-height))
+                (font-info       (font-info (format "%s-%d" font-family font-size)))
+                (ascent          (aref font-info 8))
+                (tag-char-width  (aref font-info 11))
+                (tag-width       (* (+ label-length padding) txt-char-width))
+                (tag-height      (* txt-char-height height))
+                (svg-width       (+ tag-width (* margin txt-char-width)))
+                (svg-height      tag-height)
+                (svg-ascent      (plist-get style :ascent))
+                (tag-x (/ (- svg-width tag-width) 2))
+                (text-x (+ tag-x (/ (- tag-width (* (length label) tag-char-width)) 2)))
+                (text-x (+ text-x tag-char-width))
+                (text-y ascent)
+                (viewbox (cdr (assq 'viewBox (xml-node-attributes (car root)))))
+                (viewbox (mapcar 'string-to-number (split-string viewbox)))
+                (icon-x      (nth 0 viewbox))
+                (icon-y      (nth 1 viewbox))
+                (icon-width  (nth 2 viewbox))
+                (icon-height (nth 3 viewbox))
+                (scale       (* scale (/ (float tag-height) (float icon-height))))
+                (icon-transform
+                 (format "translate(%f,%f) scale(%f) translate(%f,%f)"
+                         (- icon-x )
+                         (- icon-y )
+                         scale
+                         (- (/ (- text-x (* tag-char-width 1.25)) scale) (/ icon-width 2))
+                         (- (/ svg-height 2 scale) (/ icon-height 2))))
+                (svg (svg-create svg-width svg-height)))
+           (when (>= stroke 0.25)
+             (svg-rectangle svg tag-x 0 tag-width tag-height
+                            :fill foreground :rx radius))
+           (svg-rectangle svg (+ tag-x (/ stroke 2.0)) (/ stroke 2.0)
+                          (- tag-width stroke) (- tag-height stroke)
+                          :fill background :rx (- radius (/ stroke 2.0)))
+           (svg-text svg label
+                     :font-family font-family :font-weight font-weight  :font-size font-size
+                     :fill foreground :x text-x :y text-y)
 
-    (when (>= stroke 0.25)
-      (svg-rectangle svg tag-x 0 tag-width tag-height
-                     :fill foreground :rx radius))
-    (svg-rectangle svg (+ tag-x (/ stroke 2.0)) (/ stroke 2.0)
-                       (- tag-width stroke) (- tag-height stroke)
-                       :fill background :rx (- radius (/ stroke 2.0)))
-    (svg-text svg label
-              :font-family font-family :font-weight font-weight  :font-size font-size
-              :fill foreground :x text-x :y text-y)
 
-
-    (dolist (item (xml-get-children (car root) 'path))
-      (let* ((attrs (xml-node-attributes item))
-             (path (cdr (assoc 'd attrs)))
-             ;; (fill (or (cdr (assoc 'fill attrs)) foreground))
-             )
-        (svg-node svg 'path :d path
-                            :fill foreground
-                            :transform icon-transform)))
-    (svg-lib--image svg :ascent svg-ascent)))
+           (dolist (item (xml-get-children (car root) 'path))
+             (let* ((attrs (xml-node-attributes item))
+                    (path (cdr (assoc 'd attrs)))
+                    ;; (fill (or (cdr (assoc 'fill attrs)) foreground))
+                    )
+               (svg-node svg 'path :d path
+                         :fill foreground
+                         :transform icon-transform)))
+           (svg-lib--image svg :ascent svg-ascent)))))
 
 
 (defun svg-lib-date (&optional date face-or-style &rest args)
